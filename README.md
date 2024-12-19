@@ -100,10 +100,7 @@ Note: airoc-hci-transport is supported with btstack-integration release-v5.0.0 o
 
 Initializing airoc-hci-transport using cybt_debug_uart_init() creates two threads for handling TX and RX data over UART. It also allocates a heap whose size is defined by DEBUG_UART_MEMORY_SIZE. Application developers can tweak the value of this MACRO as per Application requirement.
 
-Also, the TX and RX task stack sizes are defined by the below MACROs and are optimized for allowing maximum traces, but can be modified to suit application needs.
-
-* DEBUG_UART_TX_TASK_STACK_SIZE
-* DEBUG_UART_RX_TASK_STACK_SIZE
+Stack sizes of TX and RX tasks are defined by DEBUG_UART_TX_TASK_STACK_SIZE and DEBUG_UART_RX_TASK_STACK_SIZE respectively, and queue count of TX task  is defined by DEBUG_UART_TX_TASK_QUEUE_COUNT. Default values of these MACROs are optimized for allowing reasonable amount of traces, but can be modified to suit application's needs.
 
 These MACROs are present in cybt_debug_uart.c
 

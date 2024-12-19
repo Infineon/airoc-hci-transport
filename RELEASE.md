@@ -10,6 +10,9 @@ The release of airoc-hci-transport library includes the following:
 
 ### What Changed?
 
+#### v1.1.0
+* Changes to enable application to override default values of stack size of TX and RX tasks and queue count of TX task as per its need
+
 #### v1.0.0
 * Initial release of airoc-hci-transport
 

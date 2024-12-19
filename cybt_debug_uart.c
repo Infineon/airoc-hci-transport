@@ -46,8 +46,12 @@ static void cybt_debug_enhanced_rx_task(void);
 
 #ifndef DISABLE_TX_TASK
 #define BT_TASK_NAME_DEBUG_UART_TX       "TX_CYBT_DEBUG_UART_Task"
+#ifndef DEBUG_UART_TX_TASK_STACK_SIZE
 #define DEBUG_UART_TX_TASK_STACK_SIZE    (0x1700)
+#endif
+#ifndef DEBUG_UART_TX_TASK_QUEUE_COUNT
 #define DEBUG_UART_TX_TASK_QUEUE_COUNT   (50)
+#endif
 #define DEBUG_UART_TX_QUEUE_ITEM_SIZE    (sizeof(void *))
 #define DEBUG_UART_TX_TASK_QUEUE         cybt_debug_uart_tx_queue
 #define DEBUG_UART_TX_TASK_PRIORITY      (CY_RTOS_PRIORITY_ABOVENORMAL)
@@ -60,9 +64,9 @@ wiced_bt_heap_t *debug_task_heap = NULL;
 #endif
 
 #define BT_TASK_NAME_DEBUG_UART_RX       "RX_CYBT_DEBUG_UART_Task"
-
+#ifndef DEBUG_UART_RX_TASK_STACK_SIZE
 #define DEBUG_UART_RX_TASK_STACK_SIZE    (0x1700)
-
+#endif
 #define DEBUG_UART_RX_TASK_PRIORITY     (CY_RTOS_PRIORITY_ABOVENORMAL)
 
 #define WICED_HDR_SZ 5
