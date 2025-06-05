@@ -100,17 +100,24 @@ typedef enum
 typedef uint32_t (*cybt_debug_uart_data_handler_t)( uint8_t* p_data, uint32_t data_len );
 
 /** Debug Uart Configuration */
+#if defined (CY_USING_HAL)
 typedef struct
 {
     cyhal_gpio_t         uart_tx_pin;  /**< Uart TXD pin */
     cyhal_gpio_t         uart_rx_pin;  /**< Uart RXD pin */
     cyhal_gpio_t         uart_rts_pin;  /**< Uart RTS pin */
     cyhal_gpio_t         uart_cts_pin;  /**< Uart CTS pin */
-
     uint32_t             baud_rate;     /**< Uart baud rate */
-
     bool                 flow_control;  /**< flow control status */
 } cybt_debug_uart_config_t;
+#else
+typedef struct
+{
+    uint32_t             baud_rate;     /**< Uart baud rate */
+    bool                 flow_control;  /**< flow control status */
+} cybt_debug_uart_config_t;
+#endif
+
 /**
  * Initialize Debug UART.
  * This debug UART is used for communication between the PSOC and host connected via USB cable.
@@ -130,6 +137,20 @@ cybt_result_t cybt_debug_uart_init(cybt_debug_uart_config_t* config, cybt_debug_
  * @note : Debug UART Must be initialized to send traces over Debug UART.
  */
 void cybt_debug_uart_deinit();
+
+/**
+ * Determines if the UART peripheral is currently in use for TX
+ *
+ * @return TX channel active status (active=true)
+ */
+bool cybt_debug_uart_is_tx_active();
+
+/**
+ * Determines if the UART peripheral is currently in use for RX
+ *
+ * @return RX channel active status (active=true)
+ */
+bool cybt_debug_uart_is_rx_active();
 
 /**
  * Sends traces over Debug UART

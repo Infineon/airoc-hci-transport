@@ -25,25 +25,40 @@ Note: airoc-hci-transport is supported with btstack-integration release-v5.0.0 o
     #include "cybt_debug_uart.h"
     ```
 3. Make necessary changes in the application code.
-    - Call `cybt_debug_uart_init(&debug_uart_configuration, NULL);` to initialize airoc-hci-transport library.<br />
-    The first argument is the debug_uart_configurations structure pointer, which has UART pin configurations (refer schematic for getting actual port_pin details) along with baud_rate and flow_control configurations. Recommended baudrates supported by the BTSPY tool are 3000000 and 115200. The second argument is an optional callback function which can be set to NULL, if the application doesn't expect any data from an external host application over UART.
+    - **In case of PSOC™ Edge E84 platform**
+        - Use the below structure and call to pass configurations for **PSOC™ Edge E84**. Remaining UART pin configurations should be done using the "Device configurator" tool.
+       ```
+       #define DEBUG_UART_BAUDRATE   3000000
 
-        ```
-          #define DEBUG_UART_BAUDRATE   3000000
-          #define DEBUG_UART_RTS        (P5_2)
-          #define DEBUG_UART_CTS        (P5_3)
+        cybt_debug_uart_config_t config = {
+                              .baud_rate = DEBUG_UART_BAUDRATE,
+                              .flow_control = TRUE
+        };
 
-          cybt_debug_uart_config_t config = {
-                                  .uart_tx_pin = CYBSP_DEBUG_UART_TX,
-                                  .uart_rx_pin = CYBSP_DEBUG_UART_RX,
-                                  .uart_cts_pin = DEBUG_UART_CTS,
-                                  .uart_rts_pin = DEBUG_UART_RTS,
-                                  .baud_rate = DEBUG_UART_BAUDRATE,
-                                  .flow_control = TRUE
-          };
+        cybt_debug_uart_init(&config, NULL);
+       ```
 
-          cybt_debug_uart_init(&config, NULL);
-        ```
+    - **In case of any other platforms**
+        - Call `cybt_debug_uart_init(&debug_uart_configuration, NULL);` to initialize airoc-hci-transport library.<br />
+        The first argument is the debug_uart_configurations structure pointer, which has UART pin configurations (refer schematic for getting actual port_pin details) along with baud_rate and flow_control configurations. Recommended baudrates supported by the BTSPY tool are 3000000 and 115200. The second argument is an optional callback function which can be set to NULL, if the application doesn't expect any data from an external host application over UART.
+
+            ```
+              #define DEBUG_UART_BAUDRATE   3000000
+              #define DEBUG_UART_RTS        (P5_2)
+              #define DEBUG_UART_CTS        (P5_3)
+
+              cybt_debug_uart_config_t config = {
+                                      .uart_tx_pin = CYBSP_DEBUG_UART_TX,
+                                      .uart_rx_pin = CYBSP_DEBUG_UART_RX,
+                                      .uart_cts_pin = DEBUG_UART_CTS,
+                                      .uart_rts_pin = DEBUG_UART_RTS,
+                                      .baud_rate = DEBUG_UART_BAUDRATE,
+                                      .flow_control = TRUE
+              };
+
+              cybt_debug_uart_init(&config, NULL);
+            ```
+
     - On receiving BTM_ENABLED_EVT, register a callback for Bluetooth protocol (HCI) traces using wiced_bt_dev_register_hci_trace()<br />
       Note: If Bluetooth protocol traces are not required, skip this step or do not call cybt_debug_uart_send_hci_trace() in the callback function. Modify the callback function appropriately.
       ```
@@ -69,7 +84,7 @@ Note: airoc-hci-transport is supported with btstack-integration release-v5.0.0 o
     cybt_platform_set_trace_level(CYBT_TRACE_ID_STACK, CYBT_TRACE_LEVEL_DEBUG);
     ```
 
-6. Additional steps to enable debug traces for **CYW5591x**.
+6. Additional steps to enable debug traces only for **CYW5591x**.
     - After calling cybt_debug_uart_init, mandatorily register a callback for debug traces using wiced_bt_dev_register_debug_trace.
 
       ```
@@ -90,8 +105,18 @@ Note: airoc-hci-transport is supported with btstack-integration release-v5.0.0 o
             cybt_debug_uart_send_trace(trace_buf_len, (uint8_t*)p_trace_buf);
         }
       ```
+7. Additional steps to enable debug traces only for **PSOC™ Edge E84**.
+    - Open "design.modus" and make the following modifcations for "Serial Communication Block (SCB) 2" (Under "Peripheral" Section) using the "Device configurator" tool.
+        - Change the "Oversample" value to 8.
+        - Check "Enable flow control" to turn on flow control.
+        - Select the Clock as "16.5 bit Divider 0 clk (CYBSP_BT_UART_CLK_DIV)".
+        - Select appropriate CTS and RTS pins.
 
-7. Download and use [BTSPY](https://github.com/Infineon/btsdk-utils)
+        **Figure 1. Modifications required for SCB 2 only for PSOC™ Edge E84.**
+
+        <img src="images/scb2_config.jpg" alt="Alt Text" width="1300" height="500">
+
+8. Download and use [BTSPY](https://github.com/Infineon/btsdk-utils)
     - Click on serial port setup
     - Select "Enable Serial Port"
     - Select the correct baudrate, port number and enable HW flow control

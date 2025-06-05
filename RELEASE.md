@@ -10,6 +10,10 @@ The release of airoc-hci-transport library includes the following:
 
 ### What Changed?
 
+#### v1.2.0
+* Added Hardware Abstraction Layer support for the PSE8XXGP family of chips.
+* Added new APIs cybt_debug_uart_is_tx_active() and cybt_debug_uart_is_rx_active() to check UART state
+
 #### v1.1.0
 * Changes to enable application to override default values of stack size of TX and RX tasks and queue count of TX task as per its need
 

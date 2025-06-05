@@ -1,14 +1,28 @@
-#if defined (CY_USING_HAL)
-#include "cyhal_uart.h"
+#if !defined (CY_USING_HAL)
 #include "cyabs_rtos.h"
 #include "cybsp_types.h"
 #include "cybt_debug_uart.h"
 #include "wiced_memory.h"
+#include "cycfg.h"
+#include "cybsp_bt_config.h"
+#include "mtb_hal.h"
 
 #if !(defined(STACK_INSIDE_BT_CTRLR) && (STACK_INSIDE_BT_CTRLR == 1))
 #include "cybt_platform_task.h"
 #include "cybt_platform_config.h"
 #include "cybt_platform_interface.h"
+
+#if (CY_CFG_PWR_SYS_IDLE_MODE == CY_CFG_PWR_MODE_DEEPSLEEP)
+#include "mtb_syspm_callbacks.h"
+#define DEBUG_UART_SYSPM_SKIP_MODE         (0U)
+#define DEBUG_UART_SYSPM_CALLBACK_ORDER    (1U)
+#endif
+
+#define CYBSP_DEBUG_UART_IRQ_SOURCE   (CYBSP_DEBUG_UART_IRQ)
+
+cy_stc_scb_uart_context_t  CYBSP_DEBUG_UART_airoc_context;  /** UART context */
+mtb_async_transfer_context_t CYBSP_DEBUG_UART_async_tx_context;
+
 extern void host_stack_mutex_lock(void * p_lock_context);
 extern void host_stack_mutex_unlock(void * p_lock_context);
 #else
@@ -32,9 +46,9 @@ cy_mutex_t   bt_stack_mutex;
         WAIT_PAYLOAD
     };
 
-static uint16_t calc_packet_crc (uint8_t *p_data, int length);
-static void cybt_build_enhanced_wiced_hci_pkt (uint8_t *p_buf, uint8_t type, uint16_t  opcode, uint16_t length, uint8_t* p_data);
-static void cybt_debug_enhanced_rx_task(void);
+	static uint16_t calc_packet_crc (uint8_t *p_data, int length);
+	static void cybt_build_enhanced_wiced_hci_pkt (uint8_t *p_buf, uint8_t type, uint16_t  opcode, uint16_t length, uint8_t* p_data);
+	static void cybt_debug_enhanced_rx_task(void);
 #else
     #define HCI_WICED_PKT               0x19
 
@@ -65,6 +79,7 @@ wiced_bt_heap_t *debug_task_heap = NULL;
 #endif
 
 #define BT_TASK_NAME_DEBUG_UART_RX       "RX_CYBT_DEBUG_UART_Task"
+
 #ifndef DEBUG_UART_RX_TASK_STACK_SIZE
 #define DEBUG_UART_RX_TASK_STACK_SIZE    (0x1700)
 #endif
@@ -89,7 +104,7 @@ wiced_bt_heap_t *debug_task_heap = NULL;
 typedef struct
 {
     bool            inited;
-    cyhal_uart_t    hal_obj;
+    mtb_hal_uart_t    CYBSP_DEBUG_UART_hal_obj;
 #ifndef DISABLE_TX_TASK
     cy_semaphore_t  tx_complete;
     cy_semaphore_t  tx_ready;
@@ -157,6 +172,47 @@ void host_stack_mutex_unlock(void * p_lock_context)
 {
     cy_rtos_set_mutex(&bt_stack_mutex);
 }
+#endif
+
+/* DEBUG UART deepsleep callback parameters  */
+#if (CY_CFG_PWR_SYS_IDLE_MODE == CY_CFG_PWR_MODE_DEEPSLEEP)
+/* Context reference structure for Debug UART */
+static mtb_syspm_uart_deepsleep_context_t debug_uart_syspm_ds_context =
+{
+    .uart_context       = &CYBSP_DEBUG_UART_airoc_context,
+    .async_context      = &CYBSP_DEBUG_UART_async_tx_context,
+    .tx_pin =
+    {
+        .port           = CYBSP_DEBUG_UART_TX_PORT,
+        .pinNum         = CYBSP_DEBUG_UART_TX_PIN,
+        .hsiom          = CYBSP_DEBUG_UART_TX_HSIOM
+    },
+    .rts_pin =
+    {
+        .port           = CYBSP_DEBUG_UART_RTS_PORT,
+        .pinNum         = CYBSP_DEBUG_UART_RTS_PIN,
+        .hsiom          = CYBSP_DEBUG_UART_RTS_HSIOM
+    }
+};
+
+/* SysPm callback parameter structure for Debug UART */
+static cy_stc_syspm_callback_params_t debug_uart_syspm_cb_params =
+{
+    .context            = &debug_uart_syspm_ds_context,
+    .base               = CYBSP_DEBUG_UART_HW
+};
+
+/* SysPm callback structure for BT UART */
+static cy_stc_syspm_callback_t debug_uart_syspm_cb =
+{
+    .callback           = &mtb_syspm_scb_uart_deepsleep_callback,
+    .skipMode           = DEBUG_UART_SYSPM_SKIP_MODE,
+    .type               = CY_SYSPM_DEEPSLEEP,
+    .callbackParams     = &debug_uart_syspm_cb_params,
+    .prevItm            = NULL,
+    .nextItm            = NULL,
+    .order              = DEBUG_UART_SYSPM_CALLBACK_ORDER
+};
 #endif
 
 BTSTACK_PORTING_SECTION_BEGIN
@@ -359,7 +415,7 @@ static void cybt_debug_tx_task(void *arg)
         // The WICED HCI header with the length follows the preamble
         data_len = ((p_data[WICED_HCI_PREAMBLE_LEN + 3] << 8) | p_data[WICED_HCI_PREAMBLE_LEN + 2]);
 
-        result = cyhal_uart_write_async (&cy_trans_uart.hal_obj, p_data, data_len + WICED_HCI_OVERHEAD);
+        result = mtb_hal_uart_write_async (&cy_trans_uart.CYBSP_DEBUG_UART_hal_obj, p_data, data_len + WICED_HCI_OVERHEAD);
 
         if (CY_RSLT_SUCCESS == result)
             cy_rtos_get_semaphore (&cy_trans_uart.tx_complete, CY_RTOS_NEVER_TIMEOUT, false);
@@ -399,22 +455,22 @@ static void cybt_debug_rx_task(void *arg)
         {
             if (CYHAL_UART_DMA_ENABLED == TRUE)
             {
-                cyhal_uart_enable_event(&cy_trans_uart.hal_obj, CYHAL_UART_IRQ_RX_DONE, 4u, true);
-                cyhal_uart_read_async(&cy_trans_uart.hal_obj, wiced_rx_cmd + head, expectedlength);
+				mtb_hal_uart_enable_event(&cy_trans_uart.CYBSP_DEBUG_UART_hal_obj, MTB_HAL_UART_IRQ_RX_DONE, true);
+				mtb_hal_uart_read_async(&cy_trans_uart.CYBSP_DEBUG_UART_hal_obj, wiced_rx_cmd + head, expectedlength);
                 continue;
             }
             else
             {
-                numAvailable = cyhal_uart_readable(&cy_trans_uart.hal_obj);
+                numAvailable = mtb_hal_uart_readable(&cy_trans_uart.CYBSP_DEBUG_UART_hal_obj);
                 if (numAvailable >= expectedlength)
                 {
-                    cyhal_uart_read(&cy_trans_uart.hal_obj, wiced_rx_cmd + head, (size_t *)&expectedlength);
+			mtb_hal_uart_read(&cy_trans_uart.CYBSP_DEBUG_UART_hal_obj, wiced_rx_cmd + head, (size_t *)&expectedlength);
                     numAvailable -= expectedlength;
                 }
                 else
                 {
-                    cyhal_uart_enable_event(&cy_trans_uart.hal_obj, CYHAL_UART_IRQ_RX_DONE, CYHAL_ISR_PRIORITY_DEFAULT, true);
-                    cyhal_uart_read_async(&cy_trans_uart.hal_obj, wiced_rx_cmd + head, expectedlength);
+					mtb_hal_uart_enable_event(&cy_trans_uart.CYBSP_DEBUG_UART_hal_obj, MTB_HAL_UART_IRQ_RX_DONE, true);
+					mtb_hal_uart_read_async(&cy_trans_uart.CYBSP_DEBUG_UART_hal_obj, wiced_rx_cmd + head, expectedlength);
                     continue;
                 }
             }
@@ -423,7 +479,7 @@ static void cybt_debug_rx_task(void *arg)
         if (numAvailable == 0)
         {
             rx_done = false;
-            cyhal_uart_enable_event(&cy_trans_uart.hal_obj, CYHAL_UART_IRQ_RX_NOT_EMPTY, CYHAL_ISR_PRIORITY_DEFAULT, true);
+            mtb_hal_uart_enable_event(&cy_trans_uart.CYBSP_DEBUG_UART_hal_obj, MTB_HAL_UART_IRQ_RX_NOT_EMPTY, true);
         }
 
         switch (phase)
@@ -538,22 +594,29 @@ static void cybt_uart_tx_irq(void)
 #endif
 
 BTSTACK_PORTING_SECTION_BEGIN
-static void cybt_uart_irq_handler_(void *handler_arg, cyhal_uart_event_t event)
+static void cybt_uart_irq_handler_(void *handler_arg, mtb_hal_uart_event_t event)
 {
     switch(event)
     {
-        case CYHAL_UART_IRQ_RX_NOT_EMPTY:
-            cyhal_uart_enable_event(&cy_trans_uart.hal_obj, CYHAL_UART_IRQ_RX_NOT_EMPTY, CYHAL_ISR_PRIORITY_DEFAULT, false);
+        case MTB_HAL_UART_IRQ_RX_NOT_EMPTY:
+		mtb_hal_uart_enable_event(&cy_trans_uart.CYBSP_DEBUG_UART_hal_obj, MTB_HAL_UART_IRQ_RX_NOT_EMPTY, false);
             cy_rtos_set_semaphore(&cy_trans_uart.rx_complete, true);
             break;
-        case CYHAL_UART_IRQ_RX_DONE:
+        case MTB_HAL_UART_IRQ_RX_DONE:
             rx_done = true;
-            cyhal_uart_enable_event(&cy_trans_uart.hal_obj, CYHAL_UART_IRQ_RX_DONE, CYHAL_ISR_PRIORITY_DEFAULT, false);
+            mtb_hal_uart_enable_event(&cy_trans_uart.CYBSP_DEBUG_UART_hal_obj, MTB_HAL_UART_IRQ_RX_DONE, false);
             cy_rtos_set_semaphore(&cy_trans_uart.rx_complete, true);
             break;
 #ifndef DISABLE_TX_TASK
-        case CYHAL_UART_IRQ_TX_TRANSMIT_IN_FIFO:
-        case CYHAL_UART_IRQ_TX_DONE:
+        case MTB_HAL_UART_IRQ_TX_TRANSMIT_IN_FIFO:
+		mtb_hal_uart_enable_event(  &cy_trans_uart.CYBSP_DEBUG_UART_hal_obj,
+		                                        MTB_HAL_UART_IRQ_TX_EMPTY,
+		                                        true);
+		break;
+        case MTB_HAL_UART_IRQ_TX_EMPTY:
+			mtb_hal_uart_enable_event(  &cy_trans_uart.CYBSP_DEBUG_UART_hal_obj,
+										MTB_HAL_UART_IRQ_TX_EMPTY,
+										false);
             cybt_uart_tx_irq();
             break;
 #endif
@@ -563,70 +626,86 @@ static void cybt_uart_irq_handler_(void *handler_arg, cyhal_uart_event_t event)
 }
 BTSTACK_PORTING_SECTION_END
 
+void mw_debug_uart_process_interrupt(mtb_hal_uart_t* uart)
+{
+    mtb_hal_uart_process_interrupt(uart);
+}
+
+void cybsb_debug_uart_interrupt_handler(void)
+{
+    mw_debug_uart_process_interrupt(&cy_trans_uart.CYBSP_DEBUG_UART_hal_obj);
+}
+
 cybt_result_t cybt_debug_uart_init(cybt_debug_uart_config_t *config, cybt_debug_uart_data_handler_t p_data_handler)
 {
-    const cyhal_uart_cfg_t uart_config =
-    {
-        .data_bits = 8,
-        .stop_bits = 1,
-        .parity = CYHAL_UART_PARITY_NONE,
-        .rx_buffer = NULL,
-        .rx_buffer_size = 0,
-    };
+	cy_rslt_t result;
+	uint32_t actual_baud_rate;
 
-#if (CYHAL_UART_DMA_ENABLED == TRUE)
-    uint16_t enable_irq_event = (CYHAL_UART_IRQ_TX_TRANSMIT_IN_FIFO | CYHAL_UART_IRQ_RX_NOT_EMPTY);
-#else
-    uint16_t enable_irq_event = (CYHAL_UART_IRQ_TX_DONE | CYHAL_UART_IRQ_RX_NOT_EMPTY);
-#endif
-
-    cy_rslt_t result = CY_RSLT_SUCCESS;
+    uint16_t enable_irq_event = (MTB_HAL_UART_IRQ_TX_TRANSMIT_IN_FIFO | MTB_HAL_UART_IRQ_RX_NOT_EMPTY);
 
     if(!cybt_debug_uart_setup)
+    {
         memset(&cy_trans_uart, 0, sizeof(hci_uart_cb_t));
+    }
     else
-        memset(&cy_trans_uart.hal_obj, 0, sizeof(cyhal_uart_t));
+    {
+        memset(&cy_trans_uart.CYBSP_DEBUG_UART_hal_obj, 0, sizeof(mtb_hal_uart_t));
+    }
 
     if (!config)
-    {
-        return CYBT_ERR_BADARG;
-    }
+	{
+		return CYBT_ERR_BADARG;
+	}
 
-    #if (CYHAL_API_VERSION >= 2)
-    {
-        /* init and setting flow control */
-        result = cyhal_uart_init(&cy_trans_uart.hal_obj,
-                                       config->uart_tx_pin,
-                                       config->uart_rx_pin,
-                                       config->uart_cts_pin,
-                                       config->uart_rts_pin,
-                                       NULL,
-                                       &uart_config
-                                      );
-    }
-    #else // HAL API version 1
-    {
-        result = cyhal_uart_init(&cy_trans_uart.hal_obj, config->uart_tx_pin, config->uart_rx_pin, NULL, &uart_config);
-        if(result != CY_RSLT_SUCCESS)
-            return CYBT_ERR_HCI_INIT_FAILED;
+	/* Initialize the SCB UART */
+	result = (cy_rslt_t)Cy_SCB_UART_Init(CYBSP_DEBUG_UART_HW,
+										&CYBSP_DEBUG_UART_config,
+										&CYBSP_DEBUG_UART_airoc_context);
+	if(CY_RSLT_SUCCESS != result)
+	{
+		return  CYBT_ERR_HCI_INIT_FAILED;
+	}
 
-        if (config->flow_control)
-        {
-            result = cyhal_uart_set_flow_control(&cy_trans_uart.hal_obj, config->uart_cts_pin, config->uart_rts_pin);
-        }
-    }
-    #endif
+	/* Enable the SCB UART */
+	Cy_SCB_UART_Enable(CYBSP_DEBUG_UART_HW);
 
-    if(result != CY_RSLT_SUCCESS)
-        return (CYBT_ERR_HCI_INIT_FAILED);
+	/*Enable the interrupt*/
+	cy_stc_sysint_t intr_cfg_1 = {.intrSrc = CYBSP_DEBUG_UART_IRQ_SOURCE, .intrPriority = 7u};
+	Cy_SysInt_Init(&intr_cfg_1, cybsb_debug_uart_interrupt_handler);
+	NVIC_EnableIRQ(CYBSP_DEBUG_UART_IRQ);
 
-#if (CYHAL_UART_DMA_ENABLED == TRUE)
-    cyhal_uart_set_async_mode(&cy_trans_uart.hal_obj, CYHAL_ASYNC_DMA, 3);
-#endif
+	/*Initialize the HAL NEXT object*/
+	result = mtb_hal_uart_setup(&cy_trans_uart.CYBSP_DEBUG_UART_hal_obj,
+								&CYBSP_DEBUG_UART_hal_config,
+								&CYBSP_DEBUG_UART_airoc_context, NULL);
+	if(CY_RSLT_SUCCESS != result)
+	{
+		return  CYBT_ERR_HCI_INIT_FAILED;
+	}
 
-    result = cyhal_uart_set_baud(&cy_trans_uart.hal_obj, config->baud_rate, NULL);
-    if(result != CY_RSLT_SUCCESS)
-        return (CYBT_ERR_HCI_INIT_FAILED);
+	result = mtb_hal_uart_config_async(&cy_trans_uart.CYBSP_DEBUG_UART_hal_obj,&CYBSP_DEBUG_UART_async_tx_context);
+	if(CY_RSLT_SUCCESS != result)
+	{
+		return  CYBT_ERR_HCI_INIT_FAILED;
+	}
+
+    result = mtb_hal_uart_set_baud(&cy_trans_uart.CYBSP_DEBUG_UART_hal_obj,
+								config->baud_rate,
+									&actual_baud_rate
+								   );
+    if(CY_RSLT_SUCCESS != result)
+	{
+		return  CYBT_ERR_HCI_SET_BAUDRATE_FAILED;
+	}
+
+	if (config->flow_control)
+	{
+		result = mtb_hal_uart_enable_cts_flow_control(&cy_trans_uart.CYBSP_DEBUG_UART_hal_obj, true);
+		if(CY_RSLT_SUCCESS != result)
+		{
+			return  CYBT_ERR_HCI_SET_FLOW_CTRL_FAILED;
+		}
+	}
 
     if(!cybt_debug_uart_setup)
     {
@@ -639,10 +718,13 @@ cybt_result_t cybt_debug_uart_init(cybt_debug_uart_config_t *config, cybt_debug_
         cy_rtos_init_mutex(&cy_trans_uart.tx_atomic);
     }
 
-    cyhal_uart_register_callback(&cy_trans_uart.hal_obj, cybt_uart_irq_handler_, NULL);
+    mtb_hal_uart_register_callback(&cy_trans_uart.CYBSP_DEBUG_UART_hal_obj, cybt_uart_irq_handler_, NULL);
+    mtb_hal_uart_enable_event(&cy_trans_uart.CYBSP_DEBUG_UART_hal_obj, (mtb_hal_uart_event_t)enable_irq_event, true);
 
-    cyhal_uart_enable_event(&cy_trans_uart.hal_obj, (cyhal_uart_event_t)enable_irq_event,
-                            CYHAL_ISR_PRIORITY_DEFAULT, true);
+#if (CY_CFG_PWR_SYS_IDLE_MODE == CY_CFG_PWR_MODE_DEEPSLEEP)
+    /* UART SysPm callback registration for DEBUG UART */
+    Cy_SysPm_RegisterCallback(&debug_uart_syspm_cb);
+#endif /* (CY_CFG_PWR_SYS_IDLE_MODE == CY_CFG_PWR_MODE_DEEPSLEEP) */
 
     cy_trans_uart.inited = true;
     p_app_rx_cmd_handler = p_data_handler;
@@ -658,36 +740,11 @@ cybt_result_t cybt_debug_uart_init(cybt_debug_uart_config_t *config, cybt_debug_
 
 void cybt_debug_uart_deinit()
 {
-	// Since the largest hardware buffer would be 256 bytes
-	// it takes about 500ms to transmit the 256 bytes at 9600 baud.
-	// Thus 1000 ms gives roughly 50% padding to this time.
-	uint32_t timeout_remaining_ms = 1000;
-	while (timeout_remaining_ms > 0)
-	{
-		if (!cybt_debug_uart_is_tx_active())
-		{
-			break;
-		}
-		cyhal_system_delay_ms(1);
-		timeout_remaining_ms--;
-	}
-
     if(cybt_debug_uart_setup)
     {
-        cyhal_uart_free(&cy_trans_uart.hal_obj);
         cy_trans_uart.inited = false;
         cy_rtos_set_semaphore(&cy_trans_uart.tx_complete, true);
     }
-}
-
-bool cybt_debug_uart_is_tx_active()
-{
-	return cyhal_uart_is_tx_active(&cy_trans_uart.hal_obj);
-}
-
-bool cybt_debug_uart_is_rx_active()
-{
-	return cyhal_uart_is_rx_active(&cy_trans_uart.hal_obj);
 }
 
 cybt_result_t cybt_debug_uart_send_trace(uint16_t length, uint8_t* p_data)
@@ -780,7 +837,7 @@ cybt_result_t cybt_trans_blocking_write (uint8_t type, uint16_t op, uint16_t dat
     ptr = (char *)&data[0];
     for (/* Empty */; nChars < index; ++nChars)
     {
-        cyhal_uart_putc(&cy_trans_uart.hal_obj, *ptr);
+	mtb_hal_uart_put(&cy_trans_uart.CYBSP_DEBUG_UART_hal_obj, *ptr);
         ++ptr;
     }
 
@@ -963,7 +1020,7 @@ static void cybt_debug_enhanced_rx_task(void)
         {
             ENH_RX_TRACE_DEBUG ("[%s] Rx TIMEOUT  phase: %d phase_len: %d  offset: %d", __FUNCTION__, phase, phase_len, offset);
 
-            cyhal_uart_read_abort (&cy_trans_uart.hal_obj);
+            mtb_hal_uart_read_abort (&cy_trans_uart.CYBSP_DEBUG_UART_hal_obj);
             bRxTimedOut = WICED_FALSE;
             phase       = WAIT_PREAMBLE_1;
             rx_done     = false;
@@ -986,22 +1043,22 @@ static void cybt_debug_enhanced_rx_task(void)
         {
             if (CYHAL_UART_DMA_ENABLED == TRUE)
             {
-                cyhal_uart_enable_event(&cy_trans_uart.hal_obj, CYHAL_UART_IRQ_RX_DONE, 4u, true);
-                cyhal_uart_read_async(&cy_trans_uart.hal_obj, wiced_rx_cmd + offset, expectedlength);
+				mtb_hal_uart_enable_event(&cy_trans_uart.CYBSP_DEBUG_UART_hal_obj, MTB_HAL_UART_IRQ_RX_DONE, true);
+				mtb_hal_uart_read_async(&cy_trans_uart.CYBSP_DEBUG_UART_hal_obj, wiced_rx_cmd + offset, expectedlength);
                 continue;
             }
             else
             {
-                numAvailable = cyhal_uart_readable(&cy_trans_uart.hal_obj);
+                numAvailable = mtb_hal_uart_readable(&cy_trans_uart.CYBSP_DEBUG_UART_hal_obj);
                 if (numAvailable >= expectedlength)
                 {
-                    cyhal_uart_read(&cy_trans_uart.hal_obj, wiced_rx_cmd + offset, (size_t *)&expectedlength);
+			mtb_hal_uart_read(&cy_trans_uart.CYBSP_DEBUG_UART_hal_obj, wiced_rx_cmd + offset, (size_t *)&expectedlength);
                     numAvailable -= expectedlength;
                 }
                 else
                 {
-                    cyhal_uart_enable_event(&cy_trans_uart.hal_obj, CYHAL_UART_IRQ_RX_DONE, CYHAL_ISR_PRIORITY_DEFAULT, true);
-                    cyhal_uart_read_async(&cy_trans_uart.hal_obj, wiced_rx_cmd + offset, expectedlength);
+					mtb_hal_uart_enable_event(&cy_trans_uart.CYBSP_DEBUG_UART_hal_obj, MTB_HAL_UART_IRQ_RX_DONE, true);
+					mtb_hal_uart_read_async(&cy_trans_uart.CYBSP_DEBUG_UART_hal_obj, wiced_rx_cmd + offset, expectedlength);
                     continue;
                 }
             }
@@ -1010,7 +1067,7 @@ static void cybt_debug_enhanced_rx_task(void)
         if (numAvailable == 0)
         {
             rx_done = false;
-            cyhal_uart_enable_event(&cy_trans_uart.hal_obj, CYHAL_UART_IRQ_RX_NOT_EMPTY, CYHAL_ISR_PRIORITY_DEFAULT, true);
+            mtb_hal_uart_enable_event(&cy_trans_uart.CYBSP_DEBUG_UART_hal_obj, MTB_HAL_UART_IRQ_RX_NOT_EMPTY, true);
         }
 
         switch (phase)
@@ -1126,4 +1183,4 @@ static void cybt_debug_enhanced_rx_task(void)
 BTSTACK_PORTING_SECTION_END
 
 #endif  // ENHANCED_WICED_HCI
-#endif  //defined (CY_USING_HAL)
+#endif //!defined (CY_USING_HAL)
