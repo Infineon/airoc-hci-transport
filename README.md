@@ -9,7 +9,7 @@ Airoc-hci-transport allows user to register a callback function which is invoked
 
 Airoc-hci-transport library needs to be initialized by passing a configuration structure through `cybt_debug_uart_init()`. Configuration structure contains UART configurations such as TX, RX, CTS, RTS pins and the baud rate. Also it optionally contains the callback pointer to receive data from the external host application.
 
-It is important to know that airoc-hci-transport and [retarget-io](https://github.com/Infineon/retarget-io) library are mutually exclusive. This means that both these libraries cannot be used simultaneously in an application on the same UART port. Retartget-io library is primarily used for retarget the standard input/output (STDIO) messages to a UART port which will be useful for application level debugging. If the requirement is to get deep insight into the Bluetooth protocol level behavior of the application or to receive data from external host application, then it is advised to use airoc-hci-transport.
+It is important to know that airoc-hci-transport and [retarget-io](https://github.com/Infineon/retarget-io) library are mutually exclusive. This means that both these libraries cannot be used simultaneously in an application. Retartget-io library is primarily used for retarget the standard input/output (STDIO) messages to a UART port which will be useful for application level debugging. If the requirement is to get deep insight into the Bluetooth protocol level behavior of the application or to receive data from external host application, then it is advised to use airoc-hci-transport.
 
 Note: airoc-hci-transport is supported with btstack-integration release-v5.0.0 or higher.
 
@@ -71,11 +71,14 @@ Note: airoc-hci-transport is supported with btstack-integration release-v5.0.0 o
                 cybt_debug_uart_send_hci_trace(type, length, p_data);
             }
       ```
-4. If airoc-hci-transport library is included in the application, it is recommended to initialize it (Call `cybt_debug_uart_init()`). By default **ENABLE_AIROC_HCI_TRANSPORT_PRINTF** MACRO (defined in cybt_debug_uart.h) is set to 1 to route the application traces (printf messages) to BTSPY utility. If airoc-hci-transport library is included in the application, with/without initializing it, and `retarget-io` library is to be used to get application traces in Teraterm/putty, then **ENABLE_AIROC_HCI_TRANSPORT_PRINTF** MACRO value needs to be set to 0 in the application makefile.<br/>
+4. If `airoc-hci-transport` library is included in the application, it is recommended to initialize it (Call `cybt_debug_uart_init()`). By default **ENABLE_AIROC_HCI_TRANSPORT_PRINTF** MACRO (defined in cybt_debug_uart.h) is set to 1 to route the application traces (printf messages) to BTSPY utility. <br/>
+If airoc-hci-transport library is included in the application, with/without initializing it, and `retarget-io` library is to be used to get application traces in Teraterm/putty, then **ENABLE_AIROC_HCI_TRANSPORT_PRINTF** MACRO value needs to be set to 0 in the application makefile. <br/>
     ```
     #define ENABLE_AIROC_HCI_TRANSPORT_PRINTF 0
     ```
-    ENABLE_AIROC_HCI_TRANSPORT_PRINTF MACRO is present in cybt_debug_uart.h
+**Note:** This will not work with `retarget-io` [release-v1.8.0](https://github.com/Infineon/retarget-io/tree/release-v1.8.0) and later as `_write` function in retarget-io was changed from weak to strong symbol. Hence application should either include `airoc-hci-transport` or `retarget-io` library. <br/>
+
+ENABLE_AIROC_HCI_TRANSPORT_PRINTF MACRO is present in cybt_debug_uart.h
 
 5. By default, it is configured to get platform error traces for hardwares that supports [btstack-integration](https://github.com/Infineon/btstack-integration). If required, more traces can be enabled by calling cybt_platform_set_trace_level() in application main() in such platforms.<br />
   cybt_platform_set_trace_level() is defined in cybt_platform_trace.c in [btstack-integration](https://github.com/Infineon/btstack-integration). Set the trace category ID and trace level as per the requirement.<br />
