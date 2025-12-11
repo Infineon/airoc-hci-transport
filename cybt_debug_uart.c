@@ -55,7 +55,9 @@ static void cybt_debug_enhanced_rx_task(void);
 #endif
 #define DEBUG_UART_TX_QUEUE_ITEM_SIZE    (sizeof(void *))
 #define DEBUG_UART_TX_TASK_QUEUE         cybt_debug_uart_tx_queue
+#ifndef DEBUG_UART_TX_TASK_PRIORITY
 #define DEBUG_UART_TX_TASK_PRIORITY      (CY_RTOS_PRIORITY_ABOVENORMAL)
+#endif
 
 #ifndef DEBUG_UART_MEMORY_SIZE
 #define DEBUG_UART_MEMORY_SIZE           (6144)
@@ -68,7 +70,9 @@ wiced_bt_heap_t *debug_task_heap = NULL;
 #ifndef DEBUG_UART_RX_TASK_STACK_SIZE
 #define DEBUG_UART_RX_TASK_STACK_SIZE    (0x1700)
 #endif
+#ifndef DEBUG_UART_RX_TASK_PRIORITY
 #define DEBUG_UART_RX_TASK_PRIORITY     (CY_RTOS_PRIORITY_ABOVENORMAL)
+#endif
 
 #define WICED_HDR_SZ 5
 
@@ -115,47 +119,145 @@ cy_thread_t cybt_debug_uart_rx_task;
 /*
  * Global variable declarations
  */
+#if ENABLE_HOSTWAKE_DEVWAKE_SUPPORT
+static bool platform_sleep_lock = false;
+static platform_gpio_config_t gpio_config;
+static cybt_wake_cfg_t g_wake = { .host_wake_pin = NC, .dev_wake_pin = NC, .host_wake_polarity = INVALID_TYPE, .dev_wake_polarity = INVALID_TYPE }; //< No Connect/Invalid Pin
+static void cybt_dev_wake_irq_handler(void *callback_arg, cyhal_gpio_event_t event);
+static cybt_result_t cybt_hostwake_devwake_init(void);
+#endif
+
 uint8_t  wiced_rx_cmd[MAX_RX_DATA_LEN + WICED_HCI_OVERHEAD]; //RX command pool.
-
-
-static bool trans_setup = false;
 static cybt_debug_uart_data_handler_t  p_app_rx_cmd_handler =  NULL;
-volatile bool rx_done = false;
 
-static bool cybt_debug_uart_setup = false;
+volatile bool       rx_done = false;
+static bool         cybt_debug_uart_threads_created = false;
+static bool         cybt_debug_uart_initialized = false;
+static bool         use_flow_control = false;
+static bool         remote_host_detected  = false;
+static cyhal_gpio_t cts_pin = NC; //< No Connect/Invalid Pin
+static uint32_t     tx_timeout = CY_RTOS_NEVER_TIMEOUT;
 
 #ifdef DISABLE_TX_TASK
-
 static cybt_result_t cybt_trans_blocking_write (uint8_t type, uint16_t opcode, uint16_t data_size, uint8_t *p_data);
-
 #else
-
 static cybt_result_t cybt_enqueue_tx_data (uint8_t type, uint16_t  op,uint16_t length, uint8_t* p_data);
 
 #if defined(STACK_INSIDE_BT_CTRLR) && (STACK_INSIDE_BT_CTRLR == 1)
-void cybt_platform_disable_irq(void)
+void cybt_platform_disable_irq(void) { __disable_irq(); }
+void cybt_platform_enable_irq(void) { __enable_irq(); }
+void *cybt_platform_malloc(uint32_t req_size) { return malloc((size_t)req_size); }
+void host_stack_mutex_lock(void * p_lock_context) { cy_rtos_get_mutex(&bt_stack_mutex, CY_RTOS_NEVER_TIMEOUT); }
+void host_stack_mutex_unlock(void * p_lock_context) { cy_rtos_set_mutex(&bt_stack_mutex); }
+#endif
+
+#if ENABLE_HOSTWAKE_DEVWAKE_SUPPORT
+static cyhal_gpio_t cybt_platform_gpio_get_pin_from_id(gpio_id_t gpio_id)
 {
-    __disable_irq();
+    cyhal_gpio_t gpio_pin = NC; //< No Connect/Invalid Pin
+
+    switch(gpio_id)
+    {
+    case HOST_WAKE_PIN:
+        gpio_pin = g_wake.host_wake_pin;
+        break;
+    case DEV_WAKE_PIN:
+        gpio_pin = g_wake.dev_wake_pin;
+        break;
+    }
+    return gpio_pin;
 }
 
-void cybt_platform_enable_irq(void)
+static cybt_result_t cybt_gpio_write(gpio_id_t gpio_id, bool value)
 {
-    __enable_irq();
+    cyhal_gpio_t gpio_pin = cybt_platform_gpio_get_pin_from_id(gpio_id);
+
+    if(NC != gpio_pin)
+    {
+        cyhal_gpio_write(gpio_pin, value);
+        return CYBT_SUCCESS;
+    }
+    else
+    {
+        return CYBT_ERR_BADARG;
+    }
 }
 
-void *cybt_platform_malloc(uint32_t req_size)
+static bool cybt_gpio_get_wake_polarity(gpio_id_t gpio_id)
 {
-    return malloc((size_t) req_size);
+    switch (gpio_id)
+    {
+    case HOST_WAKE_PIN:
+        return (g_wake.host_wake_polarity == CYBT_WAKE_ACTIVE_HIGH);
+    case DEV_WAKE_PIN:
+        return (g_wake.dev_wake_polarity == CYBT_WAKE_ACTIVE_HIGH);
+    default:
+        return false;
+    }
 }
 
-void host_stack_mutex_lock(void * p_lock_context)
+static void cybt_platform_assert_host_wake(void)
 {
-    cy_rtos_get_mutex(&bt_stack_mutex, CY_RTOS_NEVER_TIMEOUT);
+    bool wake_polarity = cybt_gpio_get_wake_polarity(HOST_WAKE_PIN);
+    cybt_gpio_write(HOST_WAKE_PIN, wake_polarity);
 }
 
-void host_stack_mutex_unlock(void * p_lock_context)
+static void cybt_platform_deassert_host_wake(void)
 {
-    cy_rtos_set_mutex(&bt_stack_mutex);
+    bool wake_polarity = cybt_gpio_get_wake_polarity(HOST_WAKE_PIN);
+    cybt_gpio_write(HOST_WAKE_PIN, !wake_polarity);
+}
+
+static void cybt_platform_sleep_lock(void)
+{
+    cybt_platform_disable_irq();
+
+    if(false == platform_sleep_lock)
+    {
+        cyhal_syspm_lock_deepsleep();
+        platform_sleep_lock = true;
+    }
+
+    cybt_platform_enable_irq();
+}
+
+static void cybt_platform_sleep_unlock(void)
+{
+    cybt_platform_disable_irq();
+
+    if (platform_sleep_lock)
+    {
+        bool dev_wake_asserted = (g_wake.dev_wake_pin != NC) && (cyhal_gpio_read(g_wake.dev_wake_pin) == cybt_gpio_get_wake_polarity(DEV_WAKE_PIN));
+        bool tx_active = cybt_debug_uart_is_tx_active();
+
+        if (!dev_wake_asserted && !tx_active)
+        {
+            cyhal_syspm_unlock_deepsleep();
+            platform_sleep_lock = false;
+        }
+    }
+
+    cybt_platform_enable_irq();
+}
+
+static void cybt_sleep_unlock_when_tx_idle(void)
+{
+    size_t queuecount = 0;
+    (void)cy_rtos_queue_count(&DEBUG_UART_TX_TASK_QUEUE, &queuecount);
+    if (queuecount != 0) return;
+
+    for (;;) //When the TX queue is empty but the HW FIFO still contains data, wait until TX is completely finished.
+    {
+        cy_rtos_queue_count(&DEBUG_UART_TX_TASK_QUEUE, &queuecount);
+        if (queuecount != 0)
+            return;
+
+        if (!cybt_debug_uart_is_tx_active())
+            break;
+    }
+
+    cybt_platform_deassert_host_wake();
+    cybt_platform_sleep_unlock();
 }
 #endif
 
@@ -216,7 +318,7 @@ static cybt_result_t cybt_enqueue_tx_data (uint8_t type, uint16_t  opcode, uint1
     cy_rslt_t   result = CYBT_ERR_GENERIC;
     size_t      count = 0;
 
-    if (trans_setup == false)
+    if ( (!cybt_debug_uart_threads_created) || (!cybt_debug_uart_initialized) )
         return CYBT_ERR_GENERIC;
 
     result = cy_rtos_get_semaphore(&cy_trans_uart.tx_ready, CY_RTOS_NEVER_TIMEOUT, false);
@@ -281,7 +383,7 @@ cybt_result_t cybt_debug_uart_send_wiced_hci_buf (void *p_buf, uint16_t op_code,
     uint8_t     *pb = (uint8_t *)p_buf;
     uint8_t     *pb_start = (uint8_t *)p_buf;
 
-    if (trans_setup == false)
+    if ( (!cybt_debug_uart_threads_created) || (!cybt_debug_uart_initialized) )
         return CYBT_ERR_GENERIC;
 
     result = cy_rtos_get_semaphore(&cy_trans_uart.tx_ready, CY_RTOS_NEVER_TIMEOUT, false);
@@ -356,15 +458,81 @@ static void cybt_debug_tx_task(void *arg)
         if (CY_RSLT_SUCCESS != result || NULL == p_data)
             continue;
 
+#if ENABLE_HOSTWAKE_DEVWAKE_SUPPORT
+        cybt_platform_sleep_lock();
+        cybt_platform_assert_host_wake();
+
         // The WICED HCI header with the length follows the preamble
         data_len = ((p_data[WICED_HCI_PREAMBLE_LEN + 3] << 8) | p_data[WICED_HCI_PREAMBLE_LEN + 2]);
-
         result = cyhal_uart_write_async (&cy_trans_uart.hal_obj, p_data, data_len + WICED_HCI_OVERHEAD);
 
-        if (CY_RSLT_SUCCESS == result)
-            cy_rtos_get_semaphore (&cy_trans_uart.tx_complete, CY_RTOS_NEVER_TIMEOUT, false);
+        if (CY_RSLT_SUCCESS != result) {
+            cybt_platform_debug_task_mempool_free(p_data);
+            cybt_platform_deassert_host_wake();
+            cybt_platform_sleep_unlock();
+            continue;
+        }
 
-        cybt_platform_debug_task_mempool_free (p_data);
+        result = cy_rtos_get_semaphore (&cy_trans_uart.tx_complete, tx_timeout, false);
+
+        if (result != CY_RSLT_SUCCESS)
+        {
+            cyhal_uart_write_abort (&cy_trans_uart.hal_obj);
+
+            // Clear all data in the queue
+            void *queue_item = NULL;
+            while (cy_rtos_get_queue(&DEBUG_UART_TX_TASK_QUEUE, &queue_item, 0, false) == CY_RSLT_SUCCESS) 
+            {
+                if (queue_item != NULL)
+                    cybt_platform_debug_task_mempool_free(queue_item);
+
+            }
+            cybt_platform_debug_task_mempool_free(p_data);
+            cybt_platform_deassert_host_wake();
+            cybt_platform_sleep_unlock();
+            continue;
+        }
+
+        cybt_platform_debug_task_mempool_free(p_data);
+
+        cybt_sleep_unlock_when_tx_idle();
+#else
+        // If flow control is enabled, drop all buffers till the remote host is detected.
+        if ( (use_flow_control) && (!remote_host_detected) )
+        {
+            if (cyhal_gpio_read(cts_pin) == false)
+                remote_host_detected = true;
+            else
+            {
+                cybt_platform_debug_task_mempool_free(p_data);
+                continue;
+            }
+        }
+
+        // The WICED HCI header with the length follows the preamble
+        data_len = ((p_data[WICED_HCI_PREAMBLE_LEN + 3] << 8) | p_data[WICED_HCI_PREAMBLE_LEN + 2]);
+		result = cyhal_uart_write_async (&cy_trans_uart.hal_obj, p_data, data_len + WICED_HCI_OVERHEAD);
+
+        if (CY_RSLT_SUCCESS != result) {
+            cybt_platform_debug_task_mempool_free(p_data);
+            continue;
+        }
+
+        result = cy_rtos_get_semaphore (&cy_trans_uart.tx_complete, tx_timeout, false);
+
+        if (result != CY_RSLT_SUCCESS)
+        {
+            cyhal_uart_write_abort (&cy_trans_uart.hal_obj);
+            if (use_flow_control)
+            {
+                if (cyhal_gpio_read(cts_pin) == true)
+                    remote_host_detected = false;
+
+            }
+        }
+        cybt_platform_debug_task_mempool_free(p_data);
+#endif
+
     }
 }
 BTSTACK_PORTING_SECTION_END
@@ -464,12 +632,9 @@ static void cybt_debug_rx_task(void *arg)
 }
 BTSTACK_PORTING_SECTION_END
 
-cybt_result_t cybt_init_debug_trans_task(void)
+cybt_result_t cybt_create_threads (void)
 {
     cy_rslt_t result;
-
-    if(true == trans_setup)
-        return CYBT_SUCCESS;
 
 #ifndef DISABLE_TX_TASK
     {
@@ -526,9 +691,156 @@ cybt_result_t cybt_init_debug_trans_task(void)
     if (result != CY_RSLT_SUCCESS)
         return CYBT_ERR_CREATE_TASK_FAILED;
 
-    trans_setup = true;
+    cybt_debug_uart_threads_created = true;
     return CYBT_SUCCESS;
 }
+
+#if ENABLE_HOSTWAKE_DEVWAKE_SUPPORT
+static void cybt_platform_gpio_set_config(gpio_id_t gpio_id)
+{
+    switch(gpio_id)
+    {
+    case DEV_WAKE_PIN:
+        gpio_config.pin_direction  = CYHAL_GPIO_DIR_INPUT;
+        gpio_config.pin_drive_mode = CYHAL_GPIO_DRIVE_NONE;
+        gpio_config.pin_init_val   = false;
+        break;
+
+    case HOST_WAKE_PIN:
+        gpio_config.pin_direction = CYHAL_GPIO_DIR_OUTPUT;
+        gpio_config.pin_drive_mode = CYHAL_GPIO_DRIVE_STRONG;
+        gpio_config.pin_init_val   = !cybt_gpio_get_wake_polarity(HOST_WAKE_PIN);
+        break;
+    default:
+        break;
+    }
+}
+
+cybt_result_t cybt_wake_gpio_init(cybt_wake_cfg_t *config)
+{
+    cy_rslt_t result = CYBT_SUCCESS;
+
+    g_wake.host_wake_pin        = config->host_wake_pin;
+    g_wake.dev_wake_pin         = config->dev_wake_pin;
+    g_wake.host_wake_polarity   = config->host_wake_polarity;
+    g_wake.dev_wake_polarity    = config->dev_wake_polarity;
+
+    result = cybt_hostwake_devwake_init();
+
+    return (cybt_result_t)result;
+}
+
+static cybt_result_t cybt_gpio_init(gpio_id_t gpio_id)
+{
+    cy_rslt_t result;
+    cyhal_gpio_t gpio_pin = cybt_platform_gpio_get_pin_from_id(gpio_id);
+
+    if(NC != gpio_pin)
+    {
+        cybt_platform_gpio_set_config(gpio_id);
+
+        result = cyhal_gpio_init(gpio_pin,
+                                 gpio_config.pin_direction,
+                                 gpio_config.pin_drive_mode,
+                                 gpio_config.pin_init_val
+                                 );
+
+        if(CY_RSLT_SUCCESS != result)
+        {
+            return CYBT_ERR_GENERIC;
+        }
+
+        return CYBT_SUCCESS;
+    }
+    return CYBT_ERR_BADARG;
+}
+
+static cybt_result_t cybt_dev_wake_irq_init(gpio_id_t gpio_id)
+{
+    cyhal_gpio_t gpio_pin = cybt_platform_gpio_get_pin_from_id(gpio_id);
+
+    if(NC != gpio_pin)
+    {
+    #if (CYHAL_API_VERSION >= 2)
+        static cyhal_gpio_callback_data_t devwake_cb = {
+            .callback     = cybt_dev_wake_irq_handler,
+            .callback_arg = NULL
+        };
+        cyhal_gpio_register_callback(g_wake.dev_wake_pin, &devwake_cb);
+    #else
+        cyhal_gpio_register_callback(g_wake.dev_wake_pin, cybt_dev_wake_irq_handler, NULL);
+    #endif
+
+        cyhal_gpio_enable_event(g_wake.dev_wake_pin, CYHAL_GPIO_IRQ_BOTH, CYHAL_ISR_PRIORITY_DEFAULT, true);
+        return CYBT_SUCCESS;
+    }
+    else
+    {
+        return CYBT_ERR_GPIO_DEV_WAKE_INIT_FAILED;
+    }
+}
+
+static void cybt_dev_wake_irq_handler(void *callback_arg, cyhal_gpio_event_t event)
+{
+    CY_UNUSED_PARAMETER(callback_arg);
+
+    switch(event)
+    {
+    case CYHAL_GPIO_IRQ_RISE:
+        if(CYBT_WAKE_ACTIVE_HIGH == g_wake.dev_wake_polarity)
+        {
+            cybt_platform_sleep_lock();
+        }
+        else
+        {
+            cybt_platform_sleep_unlock();
+        }
+        break;
+    case CYHAL_GPIO_IRQ_FALL:
+        if(CYBT_WAKE_ACTIVE_LOW == g_wake.dev_wake_polarity)
+        {
+            cybt_platform_sleep_lock();
+        }
+        else
+        {
+            cybt_platform_sleep_unlock();
+        }
+        break;
+    default:
+        break;
+    }
+}
+
+static cybt_result_t cybt_hostwake_devwake_init(void)
+{
+    cybt_result_t result;
+
+    result = cybt_gpio_init(DEV_WAKE_PIN);
+    if (result != CYBT_SUCCESS) return CYBT_ERR_GPIO_DEV_WAKE_INIT_FAILED;
+
+    result = cybt_dev_wake_irq_init(DEV_WAKE_PIN);
+    if (result != CYBT_SUCCESS) return CYBT_ERR_GPIO_DEV_WAKE_INIT_FAILED;
+
+    bool asserted_level = cybt_gpio_get_wake_polarity(DEV_WAKE_PIN);
+    bool dev_is_asserted = (cyhal_gpio_read(g_wake.dev_wake_pin) == asserted_level);
+
+    cybt_platform_disable_irq();
+    if (dev_is_asserted)
+    {
+        cybt_platform_sleep_lock();
+    }
+    cybt_platform_enable_irq();
+
+    result = cybt_gpio_init(HOST_WAKE_PIN);
+    if (result != CYBT_SUCCESS) return CYBT_ERR_GPIO_HOST_WAKE_INIT_FAILED;
+
+    bool host_inactive = !cybt_gpio_get_wake_polarity(HOST_WAKE_PIN);
+    result = cybt_gpio_write(HOST_WAKE_PIN, host_inactive);
+    if (result != CYBT_SUCCESS) return CYBT_ERR_GPIO_HOST_WAKE_INIT_FAILED;
+
+    return CYBT_SUCCESS;
+}
+#endif
 
 #ifndef DISABLE_TX_TASK
 static void cybt_uart_tx_irq(void)
@@ -563,7 +875,7 @@ static void cybt_uart_irq_handler_(void *handler_arg, cyhal_uart_event_t event)
 }
 BTSTACK_PORTING_SECTION_END
 
-cybt_result_t cybt_debug_uart_init(cybt_debug_uart_config_t *config, cybt_debug_uart_data_handler_t p_data_handler)
+cybt_result_t cybt_debug_uart_init (cybt_debug_uart_config_t *config, cybt_debug_uart_data_handler_t p_data_handler)
 {
     const cyhal_uart_cfg_t uart_config =
     {
@@ -582,7 +894,8 @@ cybt_result_t cybt_debug_uart_init(cybt_debug_uart_config_t *config, cybt_debug_
 
     cy_rslt_t result = CY_RSLT_SUCCESS;
 
-    if(!cybt_debug_uart_setup)
+    // If first time through, reset the whole structure, else just the HAL portion
+    if (!cybt_debug_uart_initialized)
         memset(&cy_trans_uart, 0, sizeof(hci_uart_cb_t));
     else
         memset(&cy_trans_uart.hal_obj, 0, sizeof(cyhal_uart_t));
@@ -592,22 +905,22 @@ cybt_result_t cybt_debug_uart_init(cybt_debug_uart_config_t *config, cybt_debug_
         return CYBT_ERR_BADARG;
     }
 
-    #if (CYHAL_API_VERSION >= 2)
+#if (CYHAL_API_VERSION >= 2)
     {
         /* init and setting flow control */
         result = cyhal_uart_init(&cy_trans_uart.hal_obj,
-                                       config->uart_tx_pin,
-                                       config->uart_rx_pin,
-                                       config->uart_cts_pin,
-                                       config->uart_rts_pin,
-                                       NULL,
-                                       &uart_config
-                                      );
+            config->uart_tx_pin,
+            config->uart_rx_pin,
+            config->uart_cts_pin,
+            config->uart_rts_pin,
+            NULL,
+            &uart_config
+        );
     }
-    #else // HAL API version 1
+#else // HAL API version 1
     {
         result = cyhal_uart_init(&cy_trans_uart.hal_obj, config->uart_tx_pin, config->uart_rx_pin, NULL, &uart_config);
-        if(result != CY_RSLT_SUCCESS)
+        if (result != CY_RSLT_SUCCESS)
             return CYBT_ERR_HCI_INIT_FAILED;
 
         if (config->flow_control)
@@ -615,9 +928,9 @@ cybt_result_t cybt_debug_uart_init(cybt_debug_uart_config_t *config, cybt_debug_
             result = cyhal_uart_set_flow_control(&cy_trans_uart.hal_obj, config->uart_cts_pin, config->uart_rts_pin);
         }
     }
-    #endif
+#endif
 
-    if(result != CY_RSLT_SUCCESS)
+    if (result != CY_RSLT_SUCCESS)
         return (CYBT_ERR_HCI_INIT_FAILED);
 
 #if (CYHAL_UART_DMA_ENABLED == TRUE)
@@ -628,7 +941,7 @@ cybt_result_t cybt_debug_uart_init(cybt_debug_uart_config_t *config, cybt_debug_
     if(result != CY_RSLT_SUCCESS)
         return (CYBT_ERR_HCI_INIT_FAILED);
 
-    if(!cybt_debug_uart_setup)
+    if (!cybt_debug_uart_initialized)
     {
 #ifndef DISABLE_TX_TASK
         cy_rtos_init_semaphore(&cy_trans_uart.tx_complete, 1, 0);
@@ -637,6 +950,17 @@ cybt_result_t cybt_debug_uart_init(cybt_debug_uart_config_t *config, cybt_debug_
         cy_rtos_init_semaphore(&cy_trans_uart.rx_complete, 1, 0);
 
         cy_rtos_init_mutex(&cy_trans_uart.tx_atomic);
+
+        use_flow_control = config->flow_control;
+
+        CY_UNUSED_PARAMETER(cts_pin);
+        CY_UNUSED_PARAMETER(remote_host_detected);
+        if (use_flow_control)
+        {
+            cts_pin              = config->uart_cts_pin;
+            remote_host_detected = false;
+            tx_timeout           = CYBT_TX_TIMEOUT_MS; // if flowed off for longer than this, abort
+        }
     }
 
     cyhal_uart_register_callback(&cy_trans_uart.hal_obj, cybt_uart_irq_handler_, NULL);
@@ -647,11 +971,10 @@ cybt_result_t cybt_debug_uart_init(cybt_debug_uart_config_t *config, cybt_debug_
     cy_trans_uart.inited = true;
     p_app_rx_cmd_handler = p_data_handler;
 
-    if(!cybt_debug_uart_setup)
-    {
-        cybt_debug_uart_setup = true;
-        cybt_init_debug_trans_task();
-    }
+    cybt_debug_uart_initialized = true;
+
+    if (!cybt_debug_uart_threads_created)
+        cybt_create_threads();
 
     return CYBT_SUCCESS;
 }
@@ -672,7 +995,7 @@ void cybt_debug_uart_deinit()
 		timeout_remaining_ms--;
 	}
 
-    if(cybt_debug_uart_setup)
+    if (cybt_debug_uart_initialized)
     {
         cyhal_uart_free(&cy_trans_uart.hal_obj);
         cy_trans_uart.inited = false;

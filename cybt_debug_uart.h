@@ -61,12 +61,20 @@ typedef enum
 } cybt_result_t;
 #endif
 
+#ifndef ENABLE_HOSTWAKE_DEVWAKE_SUPPORT
+#define ENABLE_HOSTWAKE_DEVWAKE_SUPPORT 0
+#endif
+
+#ifndef CYBT_TX_TIMEOUT_MS
+#define CYBT_TX_TIMEOUT_MS 2000 
+#endif
+
 #if defined(STACK_INSIDE_BT_CTRLR) && (STACK_INSIDE_BT_CTRLR == 1)
 #define BTSTACK_PORTING_SECTION_BEGIN
 #define BTSTACK_PORTING_SECTION_END
 #endif
 
- /*To use printf() when airoc-hci-transport is included and initialized in your application */
+/*To use printf() when airoc-hci-transport is included and initialized in your application */
 #ifndef ENABLE_AIROC_HCI_TRANSPORT_PRINTF
 #define ENABLE_AIROC_HCI_TRANSPORT_PRINTF 1
 #endif
@@ -77,7 +85,7 @@ typedef enum
  * The BLESS UART-specific configurations, including hardware pin assignment.
  * This debug UART is used for communication between the PSOC and host connected via USB cable.
  *  @{
- */
+*/
 
 #ifdef ENHANCED_WICED_HCI
     #define WICED_HCI_PREAMBLE_LEN  4                            // Sync Train (3) + Hdr CRC (1)
@@ -128,28 +136,28 @@ typedef struct
  * @returns  CYBT_SUCCESS if success else error reason.
  *
  * @note : Debug UART Must be initialized to send traces over Debug UART.
- */
+*/
 cybt_result_t cybt_debug_uart_init(cybt_debug_uart_config_t* config, cybt_debug_uart_data_handler_t p_data_handler);
 
 /**
  * De-initialize Debug UART.
  *
  * @note : Debug UART Must be initialized to send traces over Debug UART.
- */
+*/
 void cybt_debug_uart_deinit();
 
 /**
  * Determines if the UART peripheral is currently in use for TX
  *
  * @return TX channel active status (active=true)
- */
+*/
 bool cybt_debug_uart_is_tx_active();
 
 /**
  * Determines if the UART peripheral is currently in use for RX
  *
  * @return RX channel active status (active=true)
- */
+*/
 bool cybt_debug_uart_is_rx_active();
 
 /**
@@ -160,7 +168,7 @@ bool cybt_debug_uart_is_rx_active();
  *
  * @returns  CYBT_SUCCESS if success else error reason.
  *
- */
+*/
 cybt_result_t cybt_debug_uart_send_trace (uint16_t length, uint8_t* p_data);
 
 /**
@@ -172,7 +180,7 @@ cybt_result_t cybt_debug_uart_send_trace (uint16_t length, uint8_t* p_data);
  *
  * @returns  CYBT_SUCCESS if success else error reason.
  *
- */
+*/
 cybt_result_t cybt_debug_uart_send_hci_trace (uint8_t type, uint16_t length, uint8_t* p_data);
 
 /**
@@ -185,7 +193,7 @@ cybt_result_t cybt_debug_uart_send_hci_trace (uint8_t type, uint16_t length, uin
  * @returns  CYBT_SUCCESS if success else error reason.
  *
  * @note This can be used from register callback of wiced_bt_dev_register_hci_trace function.
- */
+*/
 cybt_result_t cybt_debug_uart_send_data (uint16_t opcode, uint16_t data_size, uint8_t *p_data);
 
 /**
@@ -195,7 +203,7 @@ cybt_result_t cybt_debug_uart_send_data (uint16_t opcode, uint16_t data_size, ui
  * @param[in] p_data: data pointer
  *
  * @returns  CYBT_SUCCESS if success else error reason.
- */
+*/
 cybt_result_t cybt_send_coredump_hci_trace (uint16_t data_size, uint8_t *p_data);
 
 /**
@@ -217,5 +225,54 @@ cybt_result_t cybt_send_coredump_hci_trace (uint16_t data_size, uint8_t *p_data)
 cybt_result_t cybt_debug_uart_send_wiced_hci_buf (void *p_buf, uint16_t op_code, uint16_t pay_len);
 
 /**@} */
+
+#if ENABLE_HOSTWAKE_DEVWAKE_SUPPORT
+
+#include "cyhal_gpio.h"
+
+#define CYBT_WAKE_ACTIVE_LOW          (0)
+#define CYBT_WAKE_ACTIVE_HIGH         (1)
+
+typedef struct
+{
+    cyhal_gpio_direction_t pin_direction;
+    cyhal_gpio_drive_mode_t pin_drive_mode;
+    bool pin_init_val;
+}platform_gpio_config_t;
+
+enum
+{
+    HOST_WAKE_PIN,
+    DEV_WAKE_PIN
+};
+typedef uint8_t gpio_id_t;
+
+typedef struct
+{
+    cyhal_gpio_t    host_wake_pin; /**< host_wake_pin is to wake up external Host. This is an output signal*/
+    cyhal_gpio_t    dev_wake_pin;  /**< dev_wake_pin is to wake up self. This is an input signal*/
+    uint8_t         dev_wake_polarity;
+    uint8_t         host_wake_polarity;
+} cybt_wake_cfg_t;
+
+/**
+* Initialize Host Wake and Dev Wake GPIOs and sleep management.
+*
+* @param[in] config
+*  Pointer to configuration describing:
+*   - host_wake_pin: GPIO used to wake the external host (output)
+*   - dev_wake_pin:  GPIO used by external host to wake this device (input)
+*   - host_wake_polarity: CYBT_WAKE_ACTIVE_LOW or CYBT_WAKE_ACTIVE_HIGH
+*   - dev_wake_polarity:  CYBT_WAKE_ACTIVE_LOW or CYBT_WAKE_ACTIVE_HIGH
+*
+* @returns  CYBT_SUCCESS if success else error reason.
+*
+* @note
+*  - Dev Wake is input-only and must be driven externally.
+*  - Host Wake is driven by cybt_platform_assert_host_wake() and cybt_platform_deassert_host_wake().
+*  - Requires ENABLE_HOSTWAKE_DEVWAKE_SUPPORT to be defined at build time.
+*/
+cybt_result_t cybt_wake_gpio_init(cybt_wake_cfg_t *config);
+#endif
 
 #endif //CYBT_DEBUG_UART_H

@@ -145,5 +145,52 @@ If airoc-hci-transport TX or RX task require more priority, it can be updated us
 
 NOTE: If IAR Compiler is used, user may need to change the TX task priority to be the same as that of bt_task i.e. CY_RTOS_PRIORITY_HIGH, to see all the printf traces on the BTSPY. This is due to the limitation of **__write** function of IAR compiler to transmit not more than one char at a time.
 
+## Host Wake and Device Wake
+
+#### Transmit (Device → Host)
+When the device has data to send to the host:
+- When the device has data to send, it asserts HOST_WAKE to notify and wake the host.
+- The device acquires a sleep lock to remain active throughout the transmission.
+- After the data is fully transmitted, the device deasserts HOST_WAKE.
+- Finally, the device releases the sleep lock, allowing the system to return to deep sleep.
+
+#### Receive (Host → Device)
+When data is incoming to the device:
+- When the host assert DEV_WAKE, interrupt is generated, waking the device from sleep.
+- The device becomes active and processes the received data.
+- Whenever DEV_WAKE is deasserts, releases the sleep lock so the system can transition back to deep sleep.
+
+#### Pin Configuration and Initialization
+- Wake pins are configured using the `cybt_wake_gpio_init` API.
+- Once cybt_debug_uart_init is success, Invoke the `cybt_wake_gpio_init` from the application entry point `main.c` to initialize and map the wake signals to their respective pins.
+
+#### Feature Control (Enable/Disable)
+- HOST_WAKE/DEV_WAKE support is controlled by the build-time macro `ENABLE_HOSTWAKE_DEVWAKE_SUPPORT`.
+- Enable or disable via make files by defining -DENABLE_HOSTWAKE_DEVWAKE_SUPPORT=1 or =0.
+
+#### Platform Validation
+- This feature has been tested on 20829 platform.
+
+```
+#if ENABLE_HOSTWAKE_DEVWAKE_SUPPORT
+cybt_result_t cybt_wake_gpio_init(cybt_wake_cfg_t *config)
+{
+    cy_rslt_t result = CY_RSLT_SUCCESS;
+
+    g_wake.host_wake_pin        = config->host_wake_pin;
+    g_wake.dev_wake_pin         = config->dev_wake_pin;
+    g_wake.host_wake_polarity   = config->host_wake_polarity;
+    g_wake.dev_wake_polarity    = config->dev_wake_polarity;
+
+    result = cybt_hostwake_devwake_init();
+
+    if(CY_RSLT_SUCCESS != result)
+    {
+		return CYBT_ERR_GENERIC;
+	}
+    return result;
+}
+#endif
+```
 
 © Infineon Technologies, 2024.
