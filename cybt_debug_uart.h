@@ -88,12 +88,12 @@ typedef enum
 */
 
 #ifdef ENHANCED_WICED_HCI
-    #define WICED_HCI_PREAMBLE_LEN  4                            // Sync Train (3) + Hdr CRC (1)
-    #define WICED_HCI_HDR_LEN       (WICED_HCI_PREAMBLE_LEN + 4) // Add opcode (2), length (2)
-    #define WICED_HCI_OVERHEAD      (WICED_HCI_HDR_LEN + 2)      // Add Packet CRC (2)
+    #define WICED_HCI_PREAMBLE_LEN  4U                            // Sync Train (3) + Hdr CRC (1)
+    #define WICED_HCI_HDR_LEN       (WICED_HCI_PREAMBLE_LEN + 4U) // Add opcode (2), length (2)
+    #define WICED_HCI_OVERHEAD      (WICED_HCI_HDR_LEN + 2U)      // Add Packet CRC (2)
 #else
-    #define WICED_HCI_PREAMBLE_LEN  1                            // Sync Train (1 byte, 0x19)
-    #define WICED_HCI_HDR_LEN       (WICED_HCI_PREAMBLE_LEN + 4) // Add opcode (2) and length (2)
+    #define WICED_HCI_PREAMBLE_LEN  1U                            // Sync Train (1 byte, 0x19)
+    #define WICED_HCI_HDR_LEN       (WICED_HCI_PREAMBLE_LEN + 4U) // Add opcode (2) and length (2)
     #define WICED_HCI_OVERHEAD      WICED_HCI_HDR_LEN            // No additional overhead
 #endif
 
@@ -144,21 +144,21 @@ cybt_result_t cybt_debug_uart_init(cybt_debug_uart_config_t* config, cybt_debug_
  *
  * @note : Debug UART Must be initialized to send traces over Debug UART.
 */
-void cybt_debug_uart_deinit();
+void cybt_debug_uart_deinit(void);
 
 /**
  * Determines if the UART peripheral is currently in use for TX
  *
  * @return TX channel active status (active=true)
 */
-bool cybt_debug_uart_is_tx_active();
+bool cybt_debug_uart_is_tx_active(void);
 
 /**
  * Determines if the UART peripheral is currently in use for RX
  *
  * @return RX channel active status (active=true)
 */
-bool cybt_debug_uart_is_rx_active();
+bool cybt_debug_uart_is_rx_active(void);
 
 /**
  * Sends traces over Debug UART

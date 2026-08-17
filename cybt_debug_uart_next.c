@@ -738,7 +738,7 @@ cybt_result_t cybt_debug_uart_init(cybt_debug_uart_config_t *config, cybt_debug_
     return CYBT_SUCCESS;
 }
 
-void cybt_debug_uart_deinit()
+void cybt_debug_uart_deinit(void)
 {
     if(cybt_debug_uart_setup)
     {

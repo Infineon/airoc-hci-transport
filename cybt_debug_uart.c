@@ -979,7 +979,7 @@ cybt_result_t cybt_debug_uart_init (cybt_debug_uart_config_t *config, cybt_debug
     return CYBT_SUCCESS;
 }
 
-void cybt_debug_uart_deinit()
+void cybt_debug_uart_deinit(void)
 {
 	// Since the largest hardware buffer would be 256 bytes
 	// it takes about 500ms to transmit the 256 bytes at 9600 baud.
@@ -1003,12 +1003,12 @@ void cybt_debug_uart_deinit()
     }
 }
 
-bool cybt_debug_uart_is_tx_active()
+bool cybt_debug_uart_is_tx_active(void)
 {
 	return cyhal_uart_is_tx_active(&cy_trans_uart.hal_obj);
 }
 
-bool cybt_debug_uart_is_rx_active()
+bool cybt_debug_uart_is_rx_active(void)
 {
 	return cyhal_uart_is_rx_active(&cy_trans_uart.hal_obj);
 }

@@ -10,6 +10,9 @@ The release of airoc-hci-transport library includes the following:
 
 ### What Changed?
 
+#### v1.3.1
+* Minor changes related to MISRA C 2023 compliance
+
 #### v1.3.0
 * TX transmissions are gated by CTS; data is dropped if the host is not ready, preventing deep sleep blocking.
 * Added Host Wake and Device Wake support for non-PSE8XXGP platform.
